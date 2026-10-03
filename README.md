@@ -69,29 +69,6 @@ An open-source **LSPosed (Xposed)** module for Android that reliably prevents th
 
 ---
 
-## 🤖 Automated GitHub Actions Pipeline (CI/CD)
-
-This repository includes a fully configured automated GitHub Actions workflow (`.github/workflows/build-and-release.yml`):
-
-1. **Auto Compile on Push:**
-   - Every push to `main` or `master` compiles the release APK and attaches it as a downloadable GitHub Actions artifact.
-2. **Auto Release on Tag:**
-   - When you push a git tag like `v1.0.0`, GitHub Actions will:
-     - Compile the project using JDK 17.
-     - Automatically zipalign and sign the APK (using your custom keystore secret or an auto-generated CI key).
-     - Publish a official **GitHub Release** with auto-generated changelog and the signed APK attached.
-3. **Manual Trigger (`workflow_dispatch`):**
-   - You can also trigger a release directly from the GitHub Actions web UI under **Run workflow**.
-
-### (Optional) Configuring Custom Keystore Secrets
-If you wish to sign releases with your personal release keystore instead of the CI key, add these secrets to your GitHub repository (**Settings > Secrets and variables > Actions**):
-- `KEYSTORE_BASE64`: Base64 encoded `.jks` file (`base64 -w 0 your_keystore.jks`)
-- `KEYSTORE_PASSWORD`: Keystore password
-- `KEY_ALIAS`: Key alias name
-- `KEY_PASSWORD`: Key password
-
----
-
 ## 🛠️ Local Development & Build
 
 To build the APK locally using Gradle:
