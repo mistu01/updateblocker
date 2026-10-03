@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Recommended scope for LSPosed Manager -->
+    <string-array name="xposed_scope">
+        <item>com.android.vending</item>
+        <item>android</item>
+    </string-array>
+</resources>

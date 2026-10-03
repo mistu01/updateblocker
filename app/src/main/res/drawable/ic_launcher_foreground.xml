@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+  <!-- Shield outline with a block bar inside -->
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M54,24L32,34v20c0,13.55 9.38,26.23 22,29.44c12.62,-3.21 22,-15.89 22,-29.44V34L54,24zM54,30.34l16,7.27v16.39c0,9.98 -6.83,19.34 -16,21.84c-9.17,-2.5 -16,-11.86 -16,-21.84V37.61L54,30.34z"/>
+  <path
+      android:fillColor="#FFFFFFFF"
+      android:pathData="M43,51h22v6H43z"/>
+</vector>

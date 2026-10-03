@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UpdateBlocker</string>
+    <string name="module_active">LSPosed Module Active</string>
+    <string name="module_inactive">Module Not Activated in LSPosed</string>
+    <string name="module_inactive_desc">Enable UpdateBlocker in LSPosed Manager, ensure Google Play Store is checked in the scope, and force-stop Play Store.</string>
+    <string name="module_active_desc">Hooks are functioning properly. Selected apps will be blocked from Google Play Store auto-updating and manual updates.</string>
+
+    <string name="search_hint">Search apps or package name…</string>
+    <string name="filter_all">All Apps</string>
+    <string name="filter_blocked">Blocked Only</string>
+    <string name="filter_system">System Apps</string>
+
+    <string name="action_refresh">Refresh</string>
+    <string name="action_add_custom">Add Package</string>
+    <string name="action_restart_playstore">Restart Play Store</string>
+    <string name="action_about">About</string>
+
+    <string name="dialog_add_title">Block Custom Package</string>
+    <string name="dialog_add_hint">e.g. com.example.app</string>
+    <string name="btn_add">Block</string>
+    <string name="btn_cancel">Cancel</string>
+    <string name="btn_close">Close</string>
+
+    <string name="toast_blocked">Blocked %s from auto-updating</string>
+    <string name="toast_unblocked">Unblocked %s</string>
+    <string name="toast_invalid_pkg">Please enter a valid package name</string>
+    <string name="playstore_kill_success">Play Store restarted successfully</string>
+    <string name="playstore_kill_failed">Could not kill Play Store automatically. Opening App Info…</string>
+    <string name="no_apps_found">No apps found matching your query</string>
+    <string name="loading_apps">Loading installed apps…</string>
+    
+    <string name="about_title">About UpdateBlocker</string>
+    <string name="about_content">UpdateBlocker is an open-source LSPosed module designed to reliably prevent Google Play Store from automatically updating or notifying updates for specific apps.\n\nHow it works:\n1. It intercepts Play Store package queries and reports that the app is already at the maximum version.\n2. Play Store servers see your version as up-to-date and will not schedule or trigger updates.\n3. App licenses and in-app purchases remain fully functional.\n4. It also intercepts Play Store PackageInstaller sessions as a secondary defense.\n\nScope:\n- com.android.vending (Google Play Store)\n- android (System Framework - optional secondary guard)</string>
+</resources>
