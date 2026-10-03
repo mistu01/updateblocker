@@ -13,11 +13,6 @@ on:
       - master
   workflow_dispatch:
     inputs:
-      create_release:
-        description: 'Publish a GitHub Release'
-        required: true
-        type: boolean
-        default: false
       prerelease:
         description: 'Mark release as pre-release'
         required: false
@@ -96,16 +91,32 @@ jobs:
               --out "$SIGNED_APK" "$SIGNED_APK.aligned"
           fi
 
-          # Extract version from tag or commit
-          TAG_OR_SHA="${GITHUB_REF_NAME}"
-          if [ -z "$TAG_OR_SHA" ] || [[ "$GITHUB_REF" != refs/tags/* ]]; then
-            TAG_OR_SHA=$(git rev-parse --short HEAD)
+          # Determine release tag name
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            # Extract version from app/build.gradle
+            APP_VER=$(grep "versionName" app/build.gradle | head -n 1 | awk -F '"' '{print $2}')
+            if [ -z "$APP_VER" ]; then
+              APP_VER="1.0.0"
+            fi
+            RELEASE_TAG="v${APP_VER}"
+
+            # Create and push git tag if it doesn't already exist
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            if ! git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "Creating tag $RELEASE_TAG..."
+              git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+              git push origin "$RELEASE_TAG" || echo "Tag push skipped or already exists on remote"
+            fi
           fi
 
-          FINAL_APK_NAME="UpdateBlocker-${TAG_OR_SHA}.apk"
+          FINAL_APK_NAME="UpdateBlocker-${RELEASE_TAG}.apk"
           cp "$SIGNED_APK" "./$FINAL_APK_NAME"
           echo "FINAL_APK_PATH=./$FINAL_APK_NAME" >> $GITHUB_ENV
           echo "FINAL_APK_NAME=$FINAL_APK_NAME" >> $GITHUB_ENV
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
@@ -114,26 +125,15 @@ jobs:
           path: ${{ env.FINAL_APK_PATH }}
           if-no-files-found: error
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+      - name: Create or Update GitHub Release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: UpdateBlocker ${{ env.RELEASE_TAG }}
           files: ${{ env.FINAL_APK_PATH }}
+          overwrite_files: true
           generate_release_notes: true
           prerelease: ${{ github.event.inputs.prerelease || false }}
-          body: |
-            ### 🛡️ UpdateBlocker Release
-
-            #### 📦 Download:
-            Direct installable APK attached below:
-            - **${{ env.FINAL_APK_NAME }}**
-
-            #### 🚀 Setup in LSPosed:
-            1. Download and install the APK.
-            2. Open **LSPosed Manager**.
-            3. Enable the **UpdateBlocker** module.
-            4. Recommended Scope:
-               - **Google Play Store** (`com.android.vending`)
-               - **System Framework** (`android`) *(optional secondary protection)*
-            5. Force-stop Google Play Store (or tap **Restart Play Store** in the app).
-            6. Open UpdateBlocker and choose the apps you wish to freeze from auto-updating!
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
