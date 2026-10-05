@@ -293,6 +293,7 @@ public class MainActivity extends AppCompatActivity implements AppListAdapter.On
                 Process su = Runtime.getRuntime().exec("su");
                 DataOutputStream os = new DataOutputStream(su.getOutputStream());
                 os.writeBytes("am force-stop com.android.vending\n");
+                os.writeBytes("rm -rf /data/data/com.android.vending/cache/*\n");
                 os.writeBytes("exit\n");
                 os.flush();
                 int exitCode = su.waitFor();
