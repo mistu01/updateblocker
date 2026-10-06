@@ -8,9 +8,7 @@ import android.content.pm.VersionedPackage;
 import android.os.Build;
 
 import org.luckypray.dexkit.DexKitBridge;
-import org.luckypray.dexkit.query.FindClass;
 import org.luckypray.dexkit.query.FindMethod;
-import org.luckypray.dexkit.query.matchers.ClassMatcher;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 import org.luckypray.dexkit.query.enums.StringMatchType;
 import org.luckypray.dexkit.result.MethodData;
@@ -18,8 +16,11 @@ import org.luckypray.dexkit.result.MethodDataList;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -32,8 +33,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * Strategy (outermost to innermost):
  *
  *  Layer 1 – DexKit self-update scheduler block:
- *      Play Store has a boolean method that decides whether to queue a self-update for any app.
- *      We find it at runtime via stable log strings and make it always return false for blocked pkgs.
+ *      Play Store has a boolean method that decides whether to queue a self-update.
+ *      We locate it at runtime via stable log strings and suppress update scheduling.
  *
  *  Layer 2 – DexKit auto-update v2 batch filter:
  *      Play Store sends batched auto-update requests. We locate the batch entry via a stable log
@@ -55,15 +56,12 @@ public class PlayStoreHook {
     private static final String SPOOFED_VERSION_NAME      = "999.999.999";
 
     // Stable log string fragments embedded in Play Store's self-update scheduler method.
-    // These are present across many Play Store versions (confirmed in PlayVersionSpoofer project).
-    // The method returns boolean – we make it return false to prevent the scheduler from queuing.
     private static final String SELF_UPDATE_FRAGMENT_1 =
             "Skipping DFE self-update check as there is an update already queued.";
     private static final String SELF_UPDATE_FRAGMENT_2 =
-            "Bulk scheduling self-update";
+            "Bulk scheduling self-update with policies";
 
     // Anchor log string for the auto-update v2 batch scheduling entry point.
-    // Present in Play Store's Finsky component across many versions.
     private static final String AUTO_UPDATE_V2_ANCHOR =
             "UChk: document %s is not qualified for auto update v2";
 
@@ -83,8 +81,6 @@ public class PlayStoreHook {
 
         // Layer 4: PackageInstaller last-resort guard
         hookPackageInstaller(lpparam.classLoader);
-
-        // Layers 1 & 2 are installed from Application.attach (need Context for APK path)
     }
 
     // =========================================================================
@@ -148,7 +144,7 @@ public class PlayStoreHook {
         String apkPath = context.getApplicationInfo().sourceDir;
         XposedBridge.log(TAG + " Starting DexKit scan on: " + apkPath);
 
-        // Load native library required by DexKit
+        // Load native library bundled by DexKit
         try {
             System.loadLibrary("dexkit");
         } catch (Throwable t) {
@@ -158,20 +154,16 @@ public class PlayStoreHook {
 
         try (DexKitBridge bridge = DexKitBridge.create(apkPath)) {
 
-            // -----------------------------------------------------------------
             // Layer 1 – Self-update scheduler
-            // -----------------------------------------------------------------
             boolean selfUpdateHooked = hookSelfUpdateScheduler(bridge, classLoader);
             if (!selfUpdateHooked) {
-                XposedBridge.log(TAG + " [WARN] Self-update scheduler hook not installed – DexKit scan found no unique match");
+                XposedBridge.log(TAG + " [WARN] Self-update scheduler hook not installed");
             }
 
-            // -----------------------------------------------------------------
             // Layer 2 – Auto-update v2 batch filter
-            // -----------------------------------------------------------------
             boolean autoUpdateHooked = hookAutoUpdateV2Batch(bridge, classLoader);
             if (!autoUpdateHooked) {
-                XposedBridge.log(TAG + " [WARN] Auto-update v2 batch hook not installed – DexKit scan found no unique match");
+                XposedBridge.log(TAG + " [WARN] Auto-update v2 batch hook not installed");
             }
 
         } catch (Throwable t) {
@@ -181,8 +173,6 @@ public class PlayStoreHook {
 
     /**
      * Layer 1 – Find and hook the boolean method that decides whether to schedule a self-update.
-     * The method is identified by two stable log string fragments. We make it return false,
-     * which means "no update needed / already queued", so Play Store never schedules a download.
      */
     private static boolean hookSelfUpdateScheduler(DexKitBridge bridge, ClassLoader classLoader) {
         try {
@@ -190,10 +180,9 @@ public class PlayStoreHook {
                     FindMethod.create()
                             .matcher(
                                     MethodMatcher.create()
-                                            .returnType(boolean.class)
+                                            .returnType("boolean")
                                             .usingStrings(
-                                                    SELF_UPDATE_FRAGMENT_1,
-                                                    SELF_UPDATE_FRAGMENT_2,
+                                                    Arrays.asList(SELF_UPDATE_FRAGMENT_1, SELF_UPDATE_FRAGMENT_2),
                                                     StringMatchType.Contains
                                             )
                             )
@@ -205,7 +194,7 @@ public class PlayStoreHook {
             }
 
             if (results.size() > 3) {
-                XposedBridge.log(TAG + " [DexKit] Self-update scheduler: too many candidates (" + results.size() + "), skipping to avoid false positives");
+                XposedBridge.log(TAG + " [DexKit] Self-update scheduler: too many candidates (" + results.size() + "), skipping");
                 return false;
             }
 
@@ -218,12 +207,10 @@ public class PlayStoreHook {
                     XposedBridge.hookMethod(method, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            // The scheduler returned true = "start update download"
-                            // We intercept and suppress it by returning false
                             Boolean result = (Boolean) param.getResult();
                             if (Boolean.TRUE.equals(result)) {
                                 param.setResult(false);
-                                XposedBridge.log(TAG + " [LAYER-1] Self-update scheduler suppressed – download prevented before it started");
+                                XposedBridge.log(TAG + " [LAYER-1] Suppressed self-update scheduler download");
                             }
                         }
                     });
@@ -243,21 +230,18 @@ public class PlayStoreHook {
 
     /**
      * Layer 2 – Find and hook Play Store's auto-update v2 batch method.
-     *
-     * Strategy:
-     *  1. Use the stable anchor string to find the class that logs it.
-     *  2. From that class, find a method that takes a List as a parameter (the package list).
-     *  3. Before the method runs, remove all blocked packages from the list.
      */
-    @SuppressWarnings("unchecked")
     private static boolean hookAutoUpdateV2Batch(DexKitBridge bridge, ClassLoader classLoader) {
         try {
-            // Step 1: find the declaring class via anchor log string
+            // Find declaring class via anchor log string
             MethodDataList anchorMethods = bridge.findMethod(
                     FindMethod.create()
                             .matcher(
                                     MethodMatcher.create()
-                                            .usingStrings(AUTO_UPDATE_V2_ANCHOR, StringMatchType.Contains)
+                                            .usingStrings(
+                                                    Collections.singletonList(AUTO_UPDATE_V2_ANCHOR),
+                                                    StringMatchType.Contains
+                                            )
                             )
             );
 
@@ -268,105 +252,110 @@ public class PlayStoreHook {
 
             XposedBridge.log(TAG + " [DexKit] Auto-update v2: anchor found in " + anchorMethods.size() + " method(s)");
 
-            // The anchor method's declaring class is the auto-update scheduler class.
-            // We need to hook the method in that class that receives the List of packages.
-            String anchorClassName = anchorMethods.get(0).getClassName();
-            XposedBridge.log(TAG + " [DexKit] Auto-update v2 class: " + anchorClassName);
+            Method anchorMethod = anchorMethods.get(0).getMethodInstance(classLoader);
+            Class<?> anchorClass = anchorMethod.getDeclaringClass();
+            XposedBridge.log(TAG + " [DexKit] Auto-update v2 class: " + anchorClass.getName());
 
-            // Step 2: find methods in that class that take a List parameter
-            MethodDataList scheduleMethods = bridge.findMethod(
-                    FindMethod.create()
-                            .matcher(
-                                    MethodMatcher.create()
-                                            .declaredClass(
-                                                    ClassMatcher.create().name(anchorClassName)
-                                            )
-                                            .paramTypes("java.util.List")
-                            )
-            );
-
-            // If exact match fails, broaden: find any method containing a List param
-            if (scheduleMethods == null || scheduleMethods.isEmpty()) {
-                scheduleMethods = bridge.findMethod(
-                        FindMethod.create()
-                                .matcher(
-                                        MethodMatcher.create()
-                                                .declaredClass(
-                                                        ClassMatcher.create().name(anchorClassName)
-                                                )
-                                )
-                );
-                XposedBridge.log(TAG + " [DexKit] Auto-update v2: broadened search found " +
-                        (scheduleMethods != null ? scheduleMethods.size() : 0) + " method(s) in anchor class");
+            // The auto-update scheduler method in anchorClass has:
+            // returnType == void, 4 parameters:
+            // param 0: Callback (has a void method with 1 parameter of type java.util.Set)
+            // param 1: int
+            // param 2: List (package names to auto-update)
+            // param 3: object
+            Method targetMethod = null;
+            for (Method m : anchorClass.getDeclaredMethods()) {
+                Class<?>[] params = m.getParameterTypes();
+                if (m.getReturnType() == void.class
+                        && params.length == 4
+                        && params[1] == int.class
+                        && List.class.isAssignableFrom(params[2])
+                        && hasSetCallback(params[0])) {
+                    targetMethod = m;
+                    break;
+                }
             }
 
-            if (scheduleMethods == null || scheduleMethods.isEmpty()) {
-                XposedBridge.log(TAG + " [DexKit] Auto-update v2: no schedule methods found in anchor class");
+            if (targetMethod == null) {
+                XposedBridge.log(TAG + " [DexKit] Auto-update v2: target scheduling method not found in anchor class");
                 return false;
             }
 
-            int hooked = 0;
-            for (MethodData methodData : scheduleMethods) {
-                try {
-                    Method method = methodData.getMethodInstance(classLoader);
-                    // Check if any param is a List
-                    boolean hasListParam = false;
-                    for (Class<?> pt : method.getParameterTypes()) {
-                        if (List.class.isAssignableFrom(pt)) {
-                            hasListParam = true;
+            final Method scheduleMethod = targetMethod;
+            XposedBridge.hookMethod(scheduleMethod, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    Object packagesArg = param.args[2];
+                    if (!(packagesArg instanceof List)) return;
+
+                    List<?> packagesList = (List<?>) packagesArg;
+                    boolean hasBlocked = false;
+                    for (Object item : packagesList) {
+                        String pkg = extractPackageName(item);
+                        if (pkg != null && PreferencesBridge.isBlocked(pkg, sAppContext)) {
+                            hasBlocked = true;
                             break;
                         }
                     }
-                    if (!hasListParam) continue;
 
-                    final int methodParamCount = method.getParameterCount();
-                    XposedBridge.hookMethod(method, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            // Find the List parameter and remove blocked packages
-                            for (int i = 0; i < methodParamCount && i < param.args.length; i++) {
-                                if (param.args[i] instanceof List) {
-                                    List<Object> list = (List<Object>) param.args[i];
-                                    boolean removed = removeBlockedFromList(list);
-                                    if (removed) {
-                                        XposedBridge.log(TAG + " [LAYER-2] Removed blocked package(s) from auto-update v2 batch – download never scheduled");
-                                    }
-                                    break;
-                                }
-                            }
+                    if (!hasBlocked) return;
+
+                    // Filter out blocked packages
+                    ArrayList<Object> filteredList = new ArrayList<>();
+                    for (Object item : packagesList) {
+                        String pkg = extractPackageName(item);
+                        if (pkg == null || !PreferencesBridge.isBlocked(pkg, sAppContext)) {
+                            filteredList.add(item);
+                        } else {
+                            XposedBridge.log(TAG + " [LAYER-2] Stripped blocked package from auto-update batch: " + pkg);
                         }
-                    });
-                    XposedBridge.log(TAG + " [DexKit] Hooked auto-update v2 batch method: " + methodData.getDescriptor());
-                    hooked++;
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " [DexKit] Failed to hook auto-update v2 candidate: " + t.getMessage());
-                }
-            }
-            return hooked > 0;
+                    }
 
+                    if (!filteredList.isEmpty()) {
+                        // Reassign filtered list so remaining apps update normally
+                        param.args[2] = filteredList;
+                        XposedBridge.log(TAG + " [LAYER-2] Modified auto-update batch, removed blocked packages");
+                    } else {
+                        // All apps in batch were blocked! Complete callback with empty set and cancel execution
+                        try {
+                            completeAutoUpdateCallback(param.args[0]);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " [LAYER-2] Failed to complete callback: " + t.getMessage());
+                        }
+                        param.setResult(null);
+                        XposedBridge.log(TAG + " [LAYER-2] Blocked auto-update v2 batch completely — download never scheduled");
+                    }
+                }
+            });
+
+            XposedBridge.log(TAG + " [DexKit] Successfully hooked AutoUpdate v2 batch method: " + scheduleMethod.getName());
+            return true;
         } catch (Throwable t) {
             XposedBridge.log(TAG + " [DexKit] Error finding auto-update v2 batch: " + t.getMessage());
             return false;
         }
     }
 
-    /**
-     * Removes all blocked packages from a List that may contain package name Strings
-     * or arbitrary objects with a getPackageName() / packageName field.
-     */
-    private static boolean removeBlockedFromList(List<Object> list) {
-        boolean changed = false;
-        Iterator<Object> it = list.iterator();
-        while (it.hasNext()) {
-            Object item = it.next();
-            String pkg = extractPackageName(item);
-            if (pkg != null && PreferencesBridge.isBlocked(pkg, sAppContext)) {
-                it.remove();
-                changed = true;
-                XposedBridge.log(TAG + " [LAYER-2] Stripped blocked package from batch: " + pkg);
+    private static boolean hasSetCallback(Class<?> callbackType) {
+        for (Method m : callbackType.getMethods()) {
+            if (m.getReturnType() == void.class
+                    && m.getParameterCount() == 1
+                    && Set.class.isAssignableFrom(m.getParameterTypes()[0])) {
+                return true;
             }
         }
-        return changed;
+        return false;
+    }
+
+    private static void completeAutoUpdateCallback(Object callback) throws Exception {
+        if (callback == null) return;
+        for (Method m : callback.getClass().getMethods()) {
+            if (m.getReturnType() == void.class
+                    && m.getParameterCount() == 1
+                    && Set.class.isAssignableFrom(m.getParameterTypes()[0])) {
+                m.invoke(callback, Collections.emptySet());
+                return;
+            }
+        }
     }
 
     private static String extractPackageName(Object obj) {

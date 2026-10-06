@@ -37,8 +37,8 @@ android {
         buildConfig true
     }
 
-    // DexKit bundles native .so files — they must be extracted at install time
-    packagingOptions {
+    // DexKit bundles native .so files — they must be uncompressed / legacy packaged
+    packaging {
         jniLibs {
             useLegacyPackaging = true
         }
@@ -50,7 +50,7 @@ dependencies {
     compileOnly 'de.robv.android.xposed:api:82'
 
     // DexKit – runtime DEX scanner for hooking obfuscated Play Store internals
-    implementation 'org.luckypray:dexkit-android:2.3.0'
+    implementation 'org.luckypray:dexkit:2.3.0'
 
     // AndroidX & Material UI
     implementation 'androidx.appcompat:appcompat:1.6.1'
