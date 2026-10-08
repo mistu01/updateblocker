@@ -5,6 +5,8 @@ import android.os.Binder;
 import android.os.Build;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -12,12 +14,19 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
+/**
+ * System Server hooks — runs in the 'android' (system_server) process.
+ *
+ * Intercepts PackageManagerService calls originating from Google Play Store's UID,
+ * and removes blocked packages from the response. This means Play Store never
+ * learns that blocked apps are installed, so it never schedules a download.
+ *
+ * Also blocks PackageInstallerSession.validateInstallLocked to prevent Play Store
+ * from completing an install if one somehow got started.
+ */
 public class SystemServerHook {
     private static final String TAG = "[UpdateBlocker-SystemServer]";
     private static final String PLAY_STORE_PKG = "com.android.vending";
-    private static final int SPOOFED_VERSION_CODE = 999999999;
-    private static final long SPOOFED_LONG_VERSION_CODE = 999999999999L;
-    private static final String SPOOFED_VERSION_NAME = "999.999.999";
 
     public static void init(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!"android".equals(lpparam.packageName)) {
@@ -26,22 +35,27 @@ public class SystemServerHook {
 
         XposedBridge.log(TAG + " Injecting hooks into System Framework");
 
-        // 1. Hook PackageManagerService to spoof queries originating from Google Play Store
+        // Hook PackageManagerService to filter/hide blocked packages from Play Store queries
         hookPackageManagerService(lpparam.classLoader);
 
-        // 2. Hook PackageInstallerSession to reject installations from Google Play Store
+        // Hook PackageInstallerSession to reject Play Store installations of blocked apps
         hookPackageInstallerSession(lpparam.classLoader);
     }
 
     private static void hookPackageManagerService(ClassLoader classLoader) {
         try {
-            Class<?> pmsClass = XposedHelpers.findClassIfExists("com.android.server.pm.PackageManagerService", classLoader);
-            if (pmsClass == null) return;
+            Class<?> pmsClass = XposedHelpers.findClassIfExists(
+                    "com.android.server.pm.PackageManagerService", classLoader);
+            if (pmsClass == null) {
+                XposedBridge.log(TAG + " PackageManagerService class not found, skipping");
+                return;
+            }
 
             for (Method method : pmsClass.getDeclaredMethods()) {
                 String name = method.getName();
 
-                if ("getPackageInfo".equals(name) || "getPackageInfoInternal".equals(name)) {
+                if ("getPackageInfo".equals(name) || "getPackageInfoInternal".equals(name)
+                        || "getPackageInfoWithComponents".equals(name)) {
                     XposedBridge.hookMethod(method, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
@@ -49,36 +63,39 @@ public class SystemServerHook {
 
                             String pkgName = extractPackageName(param.args);
                             if (pkgName != null && PreferencesBridge.isBlocked(pkgName, null)) {
-                                PackageInfo info = (PackageInfo) param.getResult();
-                                if (info != null) {
-                                    spoofPackageInfo(info);
-                                    param.setResult(info);
-                                    XposedBridge.log(TAG + " Spoofed PackageInfo for Play Store caller: " + pkgName);
-                                }
+                                // Return null — Play Store treats this as "app not installed"
+                                param.setResult(null);
+                                XposedBridge.log(TAG + " Hid package from Play Store (system_server): " + pkgName);
                             }
                         }
                     });
-                } else if ("getInstalledPackages".equals(name)) {
+                } else if ("getInstalledPackages".equals(name) || "getInstalledPackagesAsUser".equals(name)) {
                     XposedBridge.hookMethod(method, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             if (!isCallerPlayStore(param.thisObject)) return;
-                            handleInstalledPackagesResult(param.getResult());
+                            filterInstalledPackages(param);
                         }
                     });
                 }
             }
+            XposedBridge.log(TAG + " PackageManagerService hooks installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " Note: PackageManagerService hook error: " + t.getMessage());
+            XposedBridge.log(TAG + " PackageManagerService hook error: " + t.getMessage());
         }
     }
 
+    /**
+     * Check if the current Binder caller is the Google Play Store.
+     * Must be called from within a Binder-dispatched method (which PMS methods are).
+     */
     private static boolean isCallerPlayStore(Object pmsInstance) {
         try {
             int callingUid = Binder.getCallingUid();
-            if (callingUid < 10000) return false; // System / root UIDs
+            if (callingUid < 10000) return false; // System / root UIDs — skip
 
-            String[] packages = (String[]) XposedHelpers.callMethod(pmsInstance, "getPackagesForUid", callingUid);
+            String[] packages = (String[]) XposedHelpers.callMethod(
+                    pmsInstance, "getPackagesForUid", callingUid);
             if (packages != null) {
                 for (String pkg : packages) {
                     if (PLAY_STORE_PKG.equals(pkg)) {
@@ -93,49 +110,69 @@ public class SystemServerHook {
 
     private static String extractPackageName(Object[] args) {
         if (args == null || args.length == 0 || args[0] == null) return null;
-        if (args[0] instanceof String) {
-            return (String) args[0];
-        }
+        if (args[0] instanceof String) return (String) args[0];
         return null;
     }
 
     @SuppressWarnings("unchecked")
-    private static void handleInstalledPackagesResult(Object result) {
+    private static void filterInstalledPackages(XC_MethodHook.MethodHookParam param) {
+        Object result = param.getResult();
         if (result == null) return;
+
         List<PackageInfo> list = null;
+        boolean isParceledSlice = false;
 
         if (result instanceof List) {
             list = (List<PackageInfo>) result;
         } else if (result.getClass().getName().contains("ParceledListSlice")) {
             try {
                 list = (List<PackageInfo>) XposedHelpers.callMethod(result, "getList");
-            } catch (Throwable ignored) {
+                isParceledSlice = true;
+            } catch (Throwable ignored) {}
+        }
+
+        if (list == null) return;
+
+        // Check if any blocked packages are present
+        boolean hasBlocked = false;
+        for (PackageInfo info : list) {
+            if (info != null && PreferencesBridge.isBlocked(info.packageName, null)) {
+                hasBlocked = true;
+                break;
+            }
+        }
+        if (!hasBlocked) return;
+
+        // Build a filtered list without blocked packages
+        List<PackageInfo> filtered = new ArrayList<>();
+        for (PackageInfo info : list) {
+            if (info == null || !PreferencesBridge.isBlocked(info.packageName, null)) {
+                filtered.add(info);
+            } else {
+                XposedBridge.log(TAG + " Removed blocked package from system list (Play Store caller): " + info.packageName);
             }
         }
 
-        if (list != null) {
-            for (PackageInfo info : list) {
-                if (info != null && PreferencesBridge.isBlocked(info.packageName, null)) {
-                    spoofPackageInfo(info);
-                }
-            }
-        }
-    }
-
-    private static void spoofPackageInfo(PackageInfo info) {
-        info.versionCode = SPOOFED_VERSION_CODE;
-        info.versionName = SPOOFED_VERSION_NAME;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (!isParceledSlice) {
+            param.setResult(filtered);
+        } else {
+            // Try to reconstruct the ParceledListSlice with filtered contents
             try {
-                info.setLongVersionCode(SPOOFED_LONG_VERSION_CODE);
-            } catch (Throwable ignored) {
+                Object newSlice = XposedHelpers.newInstance(result.getClass(), filtered);
+                param.setResult(newSlice);
+            } catch (Throwable t) {
+                // Fallback: set the internal list field directly
+                try {
+                    XposedHelpers.setObjectField(result, "mList", filtered);
+                } catch (Throwable ignored) {}
             }
         }
     }
 
     private static void hookPackageInstallerSession(ClassLoader classLoader) {
         try {
-            Class<?> sessionClass = XposedHelpers.findClass("com.android.server.pm.PackageInstallerSession", classLoader);
+            Class<?> sessionClass = XposedHelpers.findClass(
+                    "com.android.server.pm.PackageInstallerSession", classLoader);
             XposedHelpers.findAndHookMethod(
                     sessionClass,
                     "validateInstallLocked",
@@ -146,26 +183,29 @@ public class SystemServerHook {
                             String targetPackage = null;
 
                             try {
-                                installerPackage = (String) XposedHelpers.getObjectField(param.thisObject, "mInstallerPackageName");
-                            } catch (Throwable ignored) {
-                            }
+                                installerPackage = (String) XposedHelpers.getObjectField(
+                                        param.thisObject, "mInstallerPackageName");
+                            } catch (Throwable ignored) {}
 
                             try {
-                                targetPackage = (String) XposedHelpers.getObjectField(param.thisObject, "mPackageName");
-                            } catch (Throwable ignored) {
-                            }
+                                targetPackage = (String) XposedHelpers.getObjectField(
+                                        param.thisObject, "mPackageName");
+                            } catch (Throwable ignored) {}
 
                             if (PLAY_STORE_PKG.equals(installerPackage) && targetPackage != null) {
                                 if (PreferencesBridge.isBlocked(targetPackage, null)) {
-                                    XposedBridge.log(TAG + " Blocked system install of " + targetPackage + " from " + installerPackage);
-                                    throw new SecurityException("UpdateBlocker: Update blocked by user for " + targetPackage);
+                                    XposedBridge.log(TAG + " Blocked system install of "
+                                            + targetPackage + " from " + installerPackage);
+                                    throw new SecurityException(
+                                            "UpdateBlocker: Update blocked by user for " + targetPackage);
                                 }
                             }
                         }
                     }
             );
+            XposedBridge.log(TAG + " validateInstallLocked hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " Note: validateInstallLocked hook error: " + t.getMessage());
+            XposedBridge.log(TAG + " validateInstallLocked hook error: " + t.getMessage());
         }
     }
 }
